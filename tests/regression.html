@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><title>03 회귀 테스트</title>
+<style>body{font:14px/1.7 system-ui,sans-serif;padding:20px;max-width:760px}.pass{color:#0a7d3b}.fail{color:#b00020;font-weight:700}h2{margin:18px 0 4px;font-size:15px}#sum{font-size:18px;font-weight:700}</style></head>
+<body>
+<h1>03 견적 후속관리 · 회귀 테스트</h1>
+<p>이 파일을 브라우저로 열면 자동 실행됩니다. 앱(<code>../app.js</code>)을 iframe에 그대로 올리고, 가짜 localStorage를 써서 실제 앱 데이터는 건드리지 않습니다.</p>
+<div id="sum">실행 중…</div><div id="out"></div>
+<script>
+const KEY='vc30.quote-followup.v1', sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let pass=0, fail=0, cur=null;
+function fakeStorage(init){const m=new Map(Object.entries(init||{}));return{getItem:k=>m.has(k)?m.get(k):null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k)}}
+async function boot(store){
+  const f=document.createElement('iframe');f.style.cssText='width:1200px;height:700px;border:0;position:absolute;left:-9999px';document.body.appendChild(f);
+  const w=f.contentWindow,c={f,w,store,alerts:[],errors:[]};
+  Object.defineProperty(w,'localStorage',{value:store,configurable:true});
+  w.alert=m=>c.alerts.push(String(m));w.confirm=()=>true;
+  w.addEventListener('error',e=>c.errors.push(e.message));
+  w.document.body.innerHTML='<div id="app"></div>';
+  await new Promise((ok,no)=>{const s=w.document.createElement('script');s.src='../app.js';s.onload=ok;s.onerror=()=>no(new Error('app.js 로드 실패'));w.document.body.appendChild(s)});
+  return c;
+}
+const $=(c,s)=>c.w.document.querySelector(s), $$=(c,s)=>[...c.w.document.querySelectorAll(s)];
+const click=(c,s)=>{const e=$(c,s);if(!e)throw new Error('요소 없음: '+s);e.click()};
+const saved=c=>JSON.parse(c.store.getItem(KEY));
+const kpi=(c,i)=>$$(c,'.kpi')[i].innerText.replace(/\s+/g,' ');
+async function importCsv(c,text){click(c,'[data-tab=data]');const dt=new c.w.DataTransfer();dt.items.add(new c.w.File([text],'t.csv',{type:'text/csv'}));const i=$(c,'#csvIn');i.files=dt.files;i.dispatchEvent(new c.w.Event('change'));await sleep(150)}
+function ok(cond,msg){cond?pass++:fail++;const d=document.createElement('div');d.className=cond?'pass':'fail';d.textContent=(cond?'✔ ':'✘ ')+msg;document.getElementById('out').appendChild(d)}
+async function test(name,fn){const h=document.createElement('h2');h.textContent=name;document.getElementById('out').appendChild(h);try{await fn()}catch(e){ok(false,'예외 발생: '+e.message)}}
+const CSV_H='quoteNo,company,contact,amount,sentAt,nextFollowUp\n';
+
+(async()=>{
+await test('1. 빈 다음 연락일은 저장되지 않는다',async()=>{
+  const c=await boot(fakeStorage());
+  click(c,'[data-tab=follow]');click(c,'[data-follow=q1]');
+  $(c,'#nextDate').value='';click(c,'#saveFollow');
+  ok(c.alerts.length===1,'오류 안내(alert)가 표시됨');
+  ok(c.store.getItem(KEY)===null,'저장소가 변경되지 않음');
+  ok(!!$(c,'.modal'),'입력 창이 그대로 열려 있음');
+  ok(c.errors.length===0,'스크립트 오류 없음');
+});
+await test('2. 잘못된 날짜가 든 CSV는 가져오지 않는다',async()=>{
+  for(const [label,row] of [['슬래시 날짜','Q-T1,테스트상사,홍길동,1500000,2026/10/01,2026-10-05'],['없는 날짜(2월 30일)','Q-T1,테스트상사,홍길동,1500000,2026-10-01,2026-02-30'],['빈 날짜','Q-T1,테스트상사,홍길동,1500000,2026-10-01,']]){
+    const c=await boot(fakeStorage());await importCsv(c,CSV_H+row+'\n');
+    ok(c.alerts.length===1&&/YYYY-MM-DD/.test(c.alerts[0]||''),label+': 형식 안내 표시');
+    ok(c.store.getItem(KEY)===null,label+': 반영되지 않음');
+  }
+  const c=await boot(fakeStorage());await importCsv(c,CSV_H+'Q-T1,테스트상사,홍길동,1500000,2026-10-01,2026-10-05\n');
+  ok(c.alerts.length===0&&saved(c).quotes.length===9&&saved(c).quotes[0].quoteNo==='Q-T1','정상 날짜 CSV는 그대로 가져옴');
+});
+await test('3. 깨진 날짜가 이미 저장돼 있어도 화면이 죽지 않는다',async()=>{
+  const bad=(id,extra)=>Object.assign({id,quoteNo:'Q-'+id,company:'깨진'+id,contact:'담당',phone:'',email:'',amount:1000000,sentAt:'2026-09-25',nextFollowUp:'2026-09-30',status:'sent',owner:'나',priority:'normal',note:'',tags:[]},extra);
+  const c=await boot(fakeStorage({[KEY]:JSON.stringify({referenceDate:'2026-09-29',activities:[],quotes:[bad('a',{nextFollowUp:''}),bad('b',{sentAt:'2026/10/01'})]})}));
+  for(const t of ['quotes','follow','reports','data','dashboard']){click(c,'[data-tab='+t+']')}
+  click(c,'[data-tab=quotes]');
+  ok(c.errors.length===0,'모든 탭을 열어도 스크립트 오류 없음');
+  ok($(c,'.topbar h2').textContent==='견적 목록'&&$$(c,'.table tbody tr').length===2,'견적 목록이 정상 표시되고 두 건 모두 보임');
+  ok($(c,'.table').innerText.includes('날짜 오류'),'깨진 날짜는 "날짜 오류"로 표시됨');
+  click(c,'[data-follow=a]');ok(!!$(c,'.modal')&&c.errors.length===0,'깨진 견적의 후속 기록 창도 열림');
+});
+await test('4. 후속 기록 창의 다음 연락일 기본값은 실습 기준일 +3일',async()=>{
+  const c=await boot(fakeStorage());
+  click(c,'[data-tab=follow]');click(c,'[data-follow=q1]');
+  ok($(c,'#nextDate').value==='2026-10-02','기준일 2026-09-29 → 2026-10-02 (실제 '+$(c,'#nextDate').value+')');
+  click(c,'#cancel');
+  const r=$(c,'#refDate');r.value='2026-12-30';r.dispatchEvent(new c.w.Event('change'));
+  click(c,'[data-follow=q1]');
+  ok($(c,'#nextDate').value==='2027-01-02','연말 넘김: 2026-12-30 → 2027-01-02 (실제 '+$(c,'#nextDate').value+')');
+});
+await test('5~6. 지연 견적 기록 후 지연 건수·후속 큐가 갱신되고, 새로고침 후에도 유지된다',async()=>{
+  const store=fakeStorage(),c=await boot(store);
+  const first=()=>$(c,'.queue .company').textContent;
+  ok(kpi(c,1).includes('3건'),'기록 전 연락 지연 3건');ok(first()==='대성유통','기록 전 큐 1순위: 대성유통 (실제 '+first()+')');
+  click(c,'[data-tab=follow]');click(c,'[data-follow=q3]');
+  $(c,'#result').value='talked';$(c,'#contactNote').value='통화 완료';click(c,'#saveFollow');
+  ok(c.alerts.length===0&&c.errors.length===0,'저장 시 오류 없음');
+  click(c,'[data-tab=dashboard]');
+  ok(kpi(c,1).includes('2건'),'기록 후 연락 지연 2건으로 감소 (실제 '+kpi(c,1)+')');
+  ok(first()!=='대성유통','후속 큐가 재계산되어 1순위 변경: '+first());
+  const q3=saved(c).quotes.find(q=>q.id==='q3');
+  ok(q3.nextFollowUp==='2026-10-02'&&q3.lastContactAt==='2026-09-29'&&saved(c).activities.length===1,'다음 연락일 2026-10-02, 마지막 연락일·활동 기록 저장됨');
+  c.f.remove();
+  const c2=await boot(store);
+  ok(kpi(c2,1).includes('2건')&&c2.errors.length===0,'새로고침(재로드) 후에도 지연 2건 유지');
+  ok(saved(c2).quotes.find(q=>q.id==='q3').nextFollowUp==='2026-10-02','새로고침 후 다음 연락일 유지');
+});
+document.getElementById('sum').textContent=(fail?'실패 ':'모두 통과 ')+`— 통과 ${pass} / 실패 ${fail}`;
+document.getElementById('sum').className=fail?'fail':'pass';document.title=(fail?'FAIL ':'PASS ')+pass+'/'+(pass+fail);
+window.__done=true;
+})();
+</script>
+</body></html>
